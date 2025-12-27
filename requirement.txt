@@ -1,0 +1,28 @@
+# 核心依赖
+Pillow>=10.0.0
+requests>=2.31.0
+urllib3>=1.26.0
+
+# 图像处理
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# 视频处理 (可选，用于高级功能)
+moviepy>=1.0.3
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+
+# 开发工具
+ipython>=8.0.0
+jupyter>=1.0.0
+black>=23.0.0
+flake8>=6.0.0
+
+# 其他工具
+python-dotenv>=1.0.0
+tqdm>=4.65.0
+colorama>=0.4.6
+
+# 系统依赖 (需要手动安装)
+# ffmpeg - 用于视频处理
+# nginx - 用于图片服务器
