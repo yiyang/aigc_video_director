@@ -1,13 +1,19 @@
 # 智能视频导演系统 (AIGC Video Director)
 
-基于火山引擎的多智能体视频生成系统，用于制作专业级三连视频。
+基于火山引擎的多智能体视频生成系统，用于制作约30秒短视频成片（分镜拼接自动合成）。
+
 
 ## 核心特性
 
-- 多智能体协作架构，包括剧本创作、视觉设计、节奏规划和质量检测
-- 专业三连视频制作：3个10秒连续视频，尾帧自动衔接
-- 支持12种专业视觉风格（电影感、写实摄影、漫画风格等）
-- 纯视觉叙事，无任何文字元素
+- **多智能体协作架构**：剧本创作、视觉设计、节奏规划和质量检测智能体协同工作
+- **约30秒成片制作**：
+  - 单镜时长：最少4秒，仅允许4/5秒混合（避免过短镜头）
+  - 总时长：目标30秒±2秒容差，系统自动优化镜头数与时长分配
+  - 分镜数量：最多10镜，按节奏风格智能规划
+  - 转场策略：按剧情决定是否尾帧续接
+  - 自动合成：ffmpeg单段合成，默认保留音轨（可配置去音）
+- **12种专业视觉风格**：电影感、写实摄影、漫画风格等
+- **纯视觉叙事**：画面严格无任何文字元素（无字幕/对白框/水印/UI）
 
 ## 快速开始
 
@@ -89,15 +95,39 @@ result = generator.generate_continuous_series(story_input)
 
 ```
 aigc_video_director/
-├── config.py              # 配置和常量定义
-├── models.py              # 数据模型定义
-├── utils.py               # 工具函数集合
-├── agents.py              # 多智能体系统
-├── video_generator.py     # 视频生成核心
-├── main.py                # 主程序入口
-├── requirements.txt       # Python依赖
-└── README.md             # 项目说明
+├── config.py                  # 配置和常量定义
+├── models.py                  # 数据模型定义
+├── utils.py                   # 工具函数集合（含时长规划器、ffmpeg合成）
+├── agents.py                  # 多智能体系统
+├── video_generator.py         # 视频生成核心（含无字兜底校验）
+├── main.py                    # 主程序入口
+├── test_duration_planner.py   # 单元测试（时长分布、音频保留、无字输出）
+├── requirements.txt           # Python依赖
+└── README.md                  # 项目说明
 ```
+
+## 配置说明
+
+关键配置项（`config.py` 中 `VIDEO_CONFIG`）：
+
+- `target_total_duration`: 目标总时长（秒），默认30
+- `target_total_tolerance`: 容差范围（秒），默认±2
+- `segment_duration_min`: 单镜最小时长（秒），默认4
+- `segment_duration_options`: 允许的单镜时长选项，默认 `[4, 5]`
+- `max_segments`: 最多分镜数，默认10
+- `force_no_audio`: 合成时是否去音轨，默认 `False`（保留音轨）
+
+## 测试
+
+运行单元测试：
+```bash
+python test_duration_planner.py
+```
+
+测试覆盖：
+- 时长规划器：验证4/5秒混合、总时长约30秒、节奏偏好（漫剧/电影）
+- 音频保留：验证默认保留音轨、可配置去音（需本机安装ffmpeg/ffprobe）
+- 无字输出：验证提示词兜底补齐"无文字/无字幕/纯画面"约束
 
 ## 许可证
 

@@ -52,7 +52,9 @@ def display_welcome():
     print("  • 🤖 多智能体协作：剧本医生 + 视觉导演 + 节奏设计师 + 质量检测官")
     print("  • 🎯 专业三幕剧结构：开场 → 发展 → 高潮反转")
     print("  • 🎨 多种视觉风格：电影感、漫画、摄影等12种风格")
-    print("  • 📹 连续视频生成：3个10秒视频，尾帧自动衔接")
+    print("  • 📹 约30秒成片：最多10镜，单镜4/5秒混合（最少4秒），按剧情决定尾帧续接，ffmpeg自动合成")
+
+
     print("  • 🚫 无文字纯画面：所有画面严格保证无任何文字")
     print("  • 👤 智能交互：用户确认环节确保质量")
     print("  • 📊 质量评估：自动评分和改进建议")
@@ -65,10 +67,11 @@ def display_system_info():
     print(f"  图片目录: {NGINX_CONFIG['local_image_dir']}")
     print(f"  输出目录: {VIDEO_CONFIG['output_dir']}")
     print(f"  图片尺寸: {VIDEO_CONFIG['image_size']}")
-    print(f"  视频时长: {VIDEO_CONFIG['video_duration']}秒/段")
-    print(f"  视频数量: {VIDEO_CONFIG['video_count']}个")
-    print(f"  总时长: {VIDEO_CONFIG['video_duration'] * VIDEO_CONFIG['video_count']}秒")
+    print(f"  目标总时长: {VIDEO_CONFIG.get('target_total_duration', 30)}s ±{VIDEO_CONFIG.get('target_total_tolerance', 2)}s")
+    print(f"  单镜时长: ≥{VIDEO_CONFIG.get('segment_duration_min', 4)}s，允许 {VIDEO_CONFIG.get('segment_duration_options', [4, 5])}")
+    print(f"  最大分镜数: {VIDEO_CONFIG.get('max_segments', VIDEO_CONFIG.get('video_count', 10))}")
     print(f"  画面要求: 无文字纯画面")
+
     print(f"  API模型: {VOLC_CONFIG['video_model']}")
 
 def display_styles():
@@ -76,6 +79,80 @@ def display_styles():
     print(f"\n🎨 可用视觉风格 ({len(COMIC_STYLES)}种):")
     for i, (key, style) in enumerate(COMIC_STYLES.items(), 1):
         print(f"  {i:2d}. {style['name']} - {style['prompt']}")
+
+def read_multiline_input(tip, end_token="END"):
+    """读取多行输入，直到用户输入 end_token 结束"""
+    print(tip)
+    print(f"（粘贴完成后输入一行 {end_token} 结束）")
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == end_token:
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+def run_30s_auto_mode():
+    """约30秒全自动模式：一次性输入粗糙剧本提示词，系统自动编剧分镜并合成"""
+
+    print("\n" + "="*70)
+    print("🚀 约30秒全自动模式（4/5秒混合） - 粘贴粗糙剧本提示词")
+
+    print("="*70)
+
+    # 选择节奏风格
+    print("\n🎭 选择节奏风格:")
+    print("  1. 漫剧（高频分镜、夸张节奏）")
+    print("  2. 电影（更连贯镜头、更克制节奏）")
+    rhythm_choice = input("选择 (1-2，默认1): ").strip()
+    rhythm_style = "movie" if rhythm_choice == "2" else "manju"
+
+    # 选择视觉风格
+    print("\n🎨 选择视觉风格:")
+    display_styles()
+    style_keys = list(COMIC_STYLES.keys())
+    choice = input(f"选择风格 (1-{len(style_keys)}，默认1): ").strip()
+    if choice and choice.isdigit():
+        choice_idx = int(choice) - 1
+        selected_style = style_keys[choice_idx] if 0 <= choice_idx < len(style_keys) else "cinematic"
+    else:
+        selected_style = "cinematic"
+
+    output_name = input("\n📁 输出系列名称 (可选，默认自动生成): ").strip()
+
+    script_prompt = read_multiline_input(
+        "\n📝 请粘贴你的初始剧本提示词（可以很粗糙，写人物/关系/冲突/结局/氛围都行）："
+    )
+    if not script_prompt:
+        print("❌ 未输入提示词，已退出")
+        return None
+
+    # 兼容旧字段：theme/summary 仍保留，但真实编剧以 script_prompt 为准
+    theme = "自定义故事"
+    summary = script_prompt[:200]
+
+    story_input = StoryInput(
+        theme=theme,
+        summary=summary,
+        characters=None,
+        style=selected_style,
+        output_name=output_name,
+        script_prompt=script_prompt,
+        rhythm_style=rhythm_style,
+        auto_mode=True,
+    )
+
+    print("\n✅ 已进入全自动模式：将生成 ≤10 镜，单镜4/5秒混合（最少4秒），并自动合成约30s成片（默认保留音轨、严格无字）")
+
+
+    print(f"  节奏风格: {rhythm_style}")
+    print(f"  视觉风格: {COMIC_STYLES[selected_style]['name']}")
+
+    return story_input
+
 
 def run_interactive_mode():
     """交互式运行模式"""
@@ -131,7 +208,9 @@ def run_interactive_mode():
     print(f"  主题: {theme}")
     print(f"  风格: {COMIC_STYLES[selected_style]['name']}")
     print(f"  画面: 无文字纯画面")
-    print(f"  时长: 3×10秒 = 30秒")
+    print(f"  时长: 约30s（系统自动规划4/5秒分镜）")
+
+
     
     return story_input
 
@@ -174,7 +253,8 @@ def run_quick_test():
     print(f"🔧 测试配置:")
     print(f"  主题: {story_input.theme}")
     print(f"  风格: {COMIC_STYLES[story_input.style]['name']}")
-    print(f"  视频: 3个10秒视频")
+    print(f"  视频: {VIDEO_CONFIG['video_count']}个{VIDEO_CONFIG['video_duration']}秒视频")
+
     print(f"  画面: 无文字纯画面")
     
     return story_input
@@ -194,12 +274,15 @@ def main():
         # 选择运行模式
         print("\n🎯 请选择运行模式:")
         print("1. 🎭 交互模式 (输入您的故事)")
-        print("2. 🧪 示例模式 (运行预定义示例)") 
+        print("2. 🧪 示例模式 (运行预定义示例)")
         print("3. ⚡ 快速测试 (快速验证功能)")
-        print("4. 🔧 环境检查")
-        print("5. 🚪 退出")
-        
-        choice = input("\n请输入选择 (1-5): ").strip()
+        print("4. 🚀 约30秒全自动模式 (粘贴粗糙剧本提示词)")
+
+        print("5. 🔧 环境检查")
+        print("6. 🚪 退出")
+
+        choice = input("\n请输入选择 (1-6): ").strip()
+
         
         story_input = None
         
@@ -210,11 +293,14 @@ def main():
         elif choice == "3":
             story_input = run_quick_test()
         elif choice == "4":
+            story_input = run_30s_auto_mode()
+        elif choice == "5":
             print("\n🔧 环境检查完成")
             return
-        elif choice == "5":
+        elif choice == "6":
             print("👋 再见！")
             return
+
         else:
             print("❌ 无效选择")
             return
@@ -222,26 +308,34 @@ def main():
         if not story_input:
             return
         
-        # 确认开始生成
-        print("\n" + "="*70)
-        confirm = input("🚀 确认开始生成视频？(y/n): ").strip().lower()
-        if confirm not in ['y', 'yes', '是']:
-            print("❌ 用户取消了生成")
-            return
+        # 确认开始生成（全自动模式默认跳过）
+        if not getattr(story_input, 'auto_mode', False):
+            print("\n" + "="*70)
+            confirm = input("🚀 确认开始生成视频？(y/n): ").strip().lower()
+            if confirm not in ['y', 'yes', '是']:
+                print("❌ 用户取消了生成")
+                return
+        else:
+            print("\n" + "="*70)
+            print("🤖 全自动模式：跳过确认，直接开始生成")
+
         
         # 初始化视频生成器
         print("\n" + "="*70)
         print("🚀 初始化视频导演系统...")
         generator = VideoGenerator({
             "volc_config": VOLC_CONFIG,
-            "nginx_config": NGINX_CONFIG, 
+            "nginx_config": NGINX_CONFIG,
             "video_config": VIDEO_CONFIG,
-            "comic_styles": COMIC_STYLES
+            "comic_styles": COMIC_STYLES,
+            "auto_mode": getattr(story_input, 'auto_mode', False),
         })
+
         
         # 生成视频系列
-        print("🎬 开始生成三连视频系列...")
+        print("🎬 开始生成视频系列...")
         result = generator.generate_continuous_series(story_input)
+
         
         # 显示最终结果
         print("\n" + "="*70)

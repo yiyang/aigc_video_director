@@ -26,13 +26,29 @@ NGINX_CONFIG = {
 VIDEO_CONFIG = {
     "output_dir": "./generated_videos",
     "image_size": "1920x1920",
-    "video_duration": 10,
-    "video_count": 3,
+
+    # 单镜时长规划（约30s成片）：单镜最少4秒，仅允许4/5秒混合
+    "target_total_duration": 30,       # 目标总时长（秒）
+    "target_total_tolerance": 2,       # 允许浮动范围（秒），例如 28~32
+    "segment_duration_min": 4,         # 单镜最小时长（秒）
+    "segment_duration_options": [4, 5],# 允许的单镜时长选项（秒）
+    "max_segments": 10,                # 最多支持分镜数
+
+    # 兼容旧字段（作为默认/兜底，避免外部调用崩溃）
+    "video_duration": 4,
+    "video_count": 10,
+
+    # 合成阶段音频策略：默认保留音轨（不刻意去音）；如需静音可设为 True
+    "force_no_audio": False,
+
     "aspect_ratio": "9:16",
     "max_retries": 3,
     "polling_interval": 5,
     "max_polling_attempts": 120
 }
+
+
+
 
 # 风格配置 (电影感为首选)
 COMIC_STYLES = {

@@ -5,8 +5,10 @@
 
 import json
 from models import StoryData, StoryInput, StorySegment
-from config import COMIC_STYLES, VOLC_CONFIG, AGENT_CONFIG
-from utils import call_volc_api
+from config import COMIC_STYLES, VOLC_CONFIG, AGENT_CONFIG, VIDEO_CONFIG
+
+from utils import call_volc_api, plan_segment_durations
+
 import textwrap
 
 class BaseAgent:
@@ -19,250 +21,352 @@ class BaseAgent:
         print(f"  🤖 {self.__class__.__name__}: {message}")
 
 class ScriptDoctorAgent(BaseAgent):
-    """剧本医生智能体 - 增强故事生成"""
-    
-    def enhance_story_prompts(self, story_input):
-        """增强版故事提示词生成"""
+    """剧本医生智能体 - 将用户粗糙提示词扩写为可执行分镜脚本"""
+
+    def enhance_story_prompts(self, story_input: StoryInput):
+        """增强版故事提示词生成（约30秒成片，单镜≥4秒，仅4/5秒混合）"""
         self.log("开始增强故事剧本生成...")
-        
-        theme = story_input.theme
-        summary = story_input.summary
-        characters = story_input.characters or ""
-        style_preference = story_input.style
-        
-        style_config = COMIC_STYLES.get(style_preference, COMIC_STYLES["cinematic"])
-        
-        # 增强的提示词设计
-        enhanced_prompt = f"""你是一个专业的影视编剧。请为以下故事创作3个连续的10秒短视频，采用专业的三幕剧结构：
 
-【故事主题】{theme}
-【详细情节】{summary}
-【角色设定】{characters}
+        style_key = getattr(story_input, "style", "cinematic") or "cinematic"
+        rhythm_style = getattr(story_input, "rhythm_style", "manju") or "manju"
+        user_script_prompt = getattr(story_input, "script_prompt", None)
 
-【专业要求】
-1. 第一幕（0-10秒）：建立冲突，3秒黄金钩子必须吸引眼球
-2. 第二幕（10-20秒）：冲突升级，制造悬念转折点  
-3. 第三幕（20-30秒）：高潮反转，留下深刻印象
+        theme = getattr(story_input, "theme", "")
+        summary = getattr(story_input, "summary", "")
+        characters = getattr(story_input, "characters", "") or ""
 
-【黄金钩子设计】
-- 每个视频前3秒必须有强力钩子
-- 使用疑问、震惊、悬念等手法
-- 长度控制在15-30字
+        style_config = COMIC_STYLES.get(style_key, COMIC_STYLES["cinematic"])
 
-【视觉要求】
-- {style_config['prompt']}
-- 绝对无文字纯画面
-- 电影级镜头语言
+        prefer_more_cuts = (rhythm_style != "movie")
+        segment_count, planned_durations, total_duration = plan_segment_durations(
+            target_total_sec=VIDEO_CONFIG.get("target_total_duration", 30),
+            tolerance_sec=VIDEO_CONFIG.get("target_total_tolerance", 2),
+            allowed_durations=VIDEO_CONFIG.get("segment_duration_options", [4, 5]),
+            min_duration_sec=VIDEO_CONFIG.get("segment_duration_min", 4),
+            max_segments=VIDEO_CONFIG.get("max_segments", VIDEO_CONFIG.get("video_count", 10)),
+            prefer_more_cuts=prefer_more_cuts,
+        )
 
 
-请严格按照以下JSON格式返回结果，确保包含所有必要字段：
+        base_story = user_script_prompt.strip() if user_script_prompt else (
+            f"主题：{theme}\n梗概：{summary}\n角色：{characters}".strip()
+        )
+
+        rhythm_guide = (
+            "【节奏风格：漫剧】\n"
+            "- 高密度信息：每镜必须有明确动作/表情/关系变化（时长4-5秒）\n"
+            "- 分镜感强：多用特写/中景切换，夸张表情与肢体语言\n"
+            "- 镜头语言：快速推进、明确运镜（推拉摇移）但不过度晃动\n"
+            "- 转场：剧情需要连续时才用 tailframe_continue，其余 hard_cut\n"
+        )
+
+        if rhythm_style == "movie":
+            rhythm_guide = (
+                "【节奏风格：电影】\n"
+                "- 连贯叙事：镜头更稳定、运动更克制，信息逐步揭示\n"
+                "- 镜头语言：明确景别（远/中/近/特写），光影与调度更讲究\n"
+                "- 转场：连续动作/同场景追随可用 tailframe_continue，其余 hard_cut\n"
+            )
+
+        strict_no_text_rules = (
+            "【硬性约束（必须遵守）】\n"
+            "1) 画面中绝对不出现任何文字：字幕/对白框/拟声词/LOGO/水印/UI/招牌/书页文字/屏幕文字等一律禁止\n"
+            "2) 仅输出画面描述，不要输出任何解释文字；最终只返回严格JSON\n"
+            f"3) 本次分镜数量为{segment_count}镜，总时长约{total_duration}秒（允许合理浮动）\n"
+            f"4) 每镜 duration_sec 必须严格等于该镜规划时长：{planned_durations}（只能是4或5，且不得低于4）\n"
+            f"5) 风格字段 style_used 必须返回视觉风格 key：\"{style_key}\"（不要返回中文名）\n"
+            "6) transition_strategy 只能是：\"tailframe_continue\" 或 \"hard_cut\"\n"
+        )
+
+
+        enhanced_prompt = f"""你是一个专业的短视频分镜编剧。请基于用户提供的粗糙剧本，生成一条总时长约{total_duration}秒的短视频分镜脚本，按{segment_count}个分镜输出（每镜时长见下方规划）。
+
+【用户粗糙剧本】
+{base_story}
+
+{rhythm_guide}
+
+【视觉风格参考】
+- 视觉风格提示词（仅供参考）：{style_config['prompt']}
+
+{strict_no_text_rules}
+
+【本次时长规划】
+- 分镜数量: {segment_count}
+- 每镜 duration_sec 依次为: {planned_durations}
+
+请严格按以下JSON格式输出（不要包含任何无关文本，不要用Markdown）：
 {{
-  "overall_title": "[视频系列整体标题]",
-  "plot_twist": "[剧情反转点描述]",
+  "overall_title": "[系列标题]",
+  "plot_twist": "[最后的反转/爆点]",
   "segments": [
     {{
       "segment_number": 1,
-      "title": "[第一幕标题]",
-      "golden_hook": "[第一幕黄金钩子，15-30字]",
-      "visual_prompt": "[第一幕视觉提示词]",
-      "video_prompt": "[第一幕视频制作提示词]",
-      "style_used": "[使用的风格名称]",
-      "aspect_ratio": "9:16"
-    }},
-    {{
-      "segment_number": 2,
-      "title": "[第二幕标题]",
-      "golden_hook": "[第二幕黄金钩子，15-30字]",
-      "visual_prompt": "[第二幕视觉提示词]",
-      "video_prompt": "[第二幕视频制作提示词]",
-      "style_used": "[使用的风格名称]",
-      "aspect_ratio": "9:16"
-    }},
-    {{
-      "segment_number": 3,
-      "title": "[第三幕标题]",
-      "golden_hook": "[第三幕黄金钩子，15-30字]",
-      "visual_prompt": "[第三幕视觉提示词]",
-      "video_prompt": "[第三幕视频制作提示词]",
-      "style_used": "[使用的风格名称]",
-      "aspect_ratio": "9:16"
+      "title": "[分镜标题]",
+      "golden_hook": "[画面钩子/爆点提示，仅供后期参考，画面里不要出现文字]",
+      "visual_prompt": "[用于首帧图片生成的单帧画面描述，强调人物/场景/构图/光影，无字]",
+      "video_prompt": "[用于视频生成的动作与运镜描述（动作、表情、景别、运镜、氛围），无字，无配音要求；时长应与 duration_sec 对应]",
+      "style_used": "{style_key}",
+      "aspect_ratio": "9:16",
+      "duration_sec": {planned_durations[0]},
+      "transition_strategy": "hard_cut",
+      "transition_reason": "[为何用该转场（可简短）]"
     }}
   ]
 }}
 
 注意：
-1. 必须包含所有字段，不要添加额外字段
-2. 确保JSON格式严格正确，不包含任何无关文本
-3. segments数组必须包含3个元素，对应三幕剧结构"""
+- segments 数组必须恰好包含 {segment_count} 个元素（segment_number 依次为 1..{segment_count}）
+- 第 i 镜的 duration_sec 必须严格等于上方规划的第 i 个数字（只能4或5，且不得低于4）
+- 你可以让某些镜头使用 transition_strategy=tailframe_continue 以便剧情连续（例如同场景连续动作/追随镜头）
+- 每个分镜的 visual_prompt/video_prompt 都必须再次强调“无文字纯画面”
+"""
+
 
         payload = {
             "model": VOLC_CONFIG["chat_model"],
             "messages": [{"role": "user", "content": enhanced_prompt}],
             "temperature": AGENT_CONFIG["script_doctor"]["temperature"],
-            "max_tokens": AGENT_CONFIG["script_doctor"]["max_tokens"]
+            "max_tokens": AGENT_CONFIG["script_doctor"]["max_tokens"],
         }
-        
+
         try:
             result = call_volc_api(payload, "chat")
-            content = result['choices'][0]['message']['content'].strip()
-            
-            # 提取JSON
-            start = content.find('{')
-            end = content.rfind('}') + 1
+            content = result["choices"][0]["message"]["content"].strip()
+
+            start = content.find("{")
+            end = content.rfind("}") + 1
             if start != -1 and end != 0:
                 json_str = content[start:end]
-                story_data = json.loads(json_str)
-                self.log("故事剧本增强完成！")
-                return self._convert_to_story_data(story_data)
-            else:
-                self.log("JSON解析失败，使用备用方案")
-                return self._create_fallback_story(story_input, style_config)
-                
+                raw = json.loads(json_str)
+                self.log("分镜剧本生成完成！")
+                return self._convert_to_story_data(
+                    raw,
+                    desired_count=segment_count,
+                    desired_durations=planned_durations,
+                    default_style_key=style_key,
+                    default_duration=int(VIDEO_CONFIG.get("video_duration", 4)),
+                )
+
+
+            self.log("JSON解析失败，使用备用方案")
+            return self._create_fallback_story(
+                story_input,
+                style_key=style_key,
+                style_config=style_config,
+                desired_count=segment_count,
+                durations=planned_durations,
+            )
+
+
         except Exception as e:
             self.log(f"剧本生成失败: {e}")
-            return self._create_fallback_story(story_input, style_config)
-    
-    def _convert_to_story_data(self, raw_data):
-        """将原始数据转换为StoryData模型"""
+            return self._create_fallback_story(
+                story_input,
+                style_key=style_key,
+                style_config=style_config,
+                desired_count=segment_count,
+                durations=planned_durations,
+            )
+
+
+    def _normalize_style_key(self, style_used, default_style_key="cinematic"):
+        """兼容 style key / 中文名，内部统一返回 key"""
+        if not style_used:
+            return default_style_key
+        if style_used in COMIC_STYLES:
+            return style_used
+        for k, v in COMIC_STYLES.items():
+            if v.get("name") == style_used:
+                return k
+        return default_style_key
+
+    def _convert_to_story_data(self, raw_data, desired_count=10, desired_durations=None, default_style_key="cinematic", default_duration=4):
+        """将原始数据转换为StoryData模型，并保证分镜数量满足 desired_count。
+
+        - 若提供 desired_durations（长度=desired_count），则会强制覆盖每镜 duration_sec
+        - 未提供时，会将 duration_sec 归一到 4/5 秒（且不得低于4秒）
+        """
+
         segments = []
-        
-        # 处理大模型返回的segments
-        raw_segments = raw_data.get('segments', [])
-        self.log(f"原始数据中找到{len(raw_segments)}个分段")
-        
-        for seg_idx, seg in enumerate(raw_segments):
+
+        raw_segments = raw_data.get("segments", [])
+        self.log(f"原始数据中找到{len(raw_segments)}个分镜")
+
+        # 按 segment_number 排序，缺失则按出现顺序
+        def seg_sort_key(s):
+            if isinstance(s, dict) and isinstance(s.get("segment_number"), int):
+                return s.get("segment_number")
+            return 10**9
+
+        if isinstance(raw_segments, list):
+            raw_segments_sorted = sorted(raw_segments, key=seg_sort_key)
+        else:
+            raw_segments_sorted = []
+
+        for seg_idx, seg in enumerate(raw_segments_sorted):
             if not isinstance(seg, dict):
-                self.log(f"⚠️  分段{seg_idx+1}不是字典类型，跳过")
                 continue
-            
-            # 检查必要字段
-            has_required_fields = all(key in seg for key in ['golden_hook', 'visual_prompt', 'video_prompt'])
-            if not has_required_fields:
-                self.log(f"⚠️  分段{seg_idx+1}缺少必要字段，跳过")
+
+            if "visual_prompt" not in seg or "video_prompt" not in seg:
                 continue
-            
-            # 创建StorySegment
+
+            style_key = self._normalize_style_key(seg.get("style_used"), default_style_key)
+            duration_sec = int(seg.get("duration_sec", default_duration) or default_duration)
+            # 时长归一：只允许 4/5 秒，且不得低于4秒
+            duration_sec = 5 if duration_sec >= 5 else 4
+            transition_strategy = seg.get("transition_strategy", "hard_cut")
+
+            if transition_strategy not in ["hard_cut", "tailframe_continue"]:
+                transition_strategy = "hard_cut"
+
             segment = StorySegment(
-                segment_number=seg.get('segment_number', seg_idx + 1),
-                title=seg.get('title', f"第{seg_idx+1}段"),
-                golden_hook=seg.get('golden_hook', ''),
-                visual_prompt=seg.get('visual_prompt', ''),
-                video_prompt=seg.get('video_prompt', ''),
-                narration=seg.get('narration', ["注意看！", "事情不简单", "继续往下看"]),
-                style_used=seg.get('style_used', 'cinematic'),
-                aspect_ratio=seg.get('aspect_ratio', '9:16'),
-                keywords=seg.get('keywords', [])
+                segment_number=seg.get("segment_number", seg_idx + 1),
+                title=seg.get("title", f"镜头{seg_idx+1:02d}"),
+                golden_hook=seg.get("golden_hook", ""),
+                visual_prompt=seg.get("visual_prompt", ""),
+                video_prompt=seg.get("video_prompt", ""),
+                narration=seg.get("narration", []),
+                style_used=style_key,
+                aspect_ratio=seg.get("aspect_ratio", "9:16"),
+                keywords=seg.get("keywords", []),
+                duration_sec=duration_sec,
+                transition_strategy=transition_strategy,
+                transition_reason=seg.get("transition_reason"),
             )
             segments.append(segment)
-        
-        # 确保至少有一个有效分段
-        if not segments:
-            self.log("⚠️  没有获取到有效分段，创建默认分段")
-            # 创建3个默认分段，确保有完整的三幕结构
-            for i in range(3):
-                segment_title = ["开场", "发展", "高潮"][i]
-                segment = StorySegment(
-                    segment_number=i + 1,
-                    title=f"默认{segment_title}",
-                    golden_hook=["眼前的一幕让人震惊！", "危险正在悄悄靠近！", "最后的真相竟然是这样！"][i],
-                    visual_prompt=f"{segment_title}画面，建立场景和氛围，9:16竖屏构图，无文字纯画面",
-                    video_prompt=f"0-3秒展示震撼的{segment_title}画面，3-7秒情节发展，7-10秒悬念铺垫，纯画面无文字",
-                    narration=["注意看！", "事情不简单", "继续往下看"],
-                    style_used='cinematic',
-                    aspect_ratio='9:16',
-                    keywords=[segment_title, '震撼']
+
+        # 统一重排为 1..desired_count
+        if len(segments) > desired_count:
+            segments = segments[:desired_count]
+
+        if len(segments) < desired_count:
+            self.log(f"⚠️  有效分镜不足{desired_count}个，补充分镜")
+            style_config = COMIC_STYLES.get(default_style_key, COMIC_STYLES["cinematic"])
+            for i in range(len(segments), desired_count):
+                idx = i + 1
+                segments.append(
+                    StorySegment(
+                        segment_number=idx,
+                        title=f"补充分镜{idx:02d}",
+                        golden_hook="",
+                        visual_prompt=f"{style_config['prompt']}，关键动作瞬间，9:16竖屏构图，绝对无文字，纯画面",
+                        video_prompt=f"{default_duration}秒短镜头：明确动作与情绪变化，景别清晰，运镜自然，绝对无文字纯画面",
+
+                        narration=[],
+                        style_used=default_style_key,
+                        aspect_ratio="9:16",
+                        keywords=style_config.get("keywords", [])[:2],
+                        duration_sec=default_duration,
+                        transition_strategy="hard_cut",
+                        transition_reason="补充分镜",
+                    )
                 )
-                segments.append(segment)
-        elif len(segments) < 3:
-            self.log(f"⚠️  只有{len(segments)}个有效分段，补充到3个")
-            # 补充到3个分段
-            for i in range(len(segments), 3):
-                segment_title = ["开场", "发展", "高潮"][i]
-                segment = StorySegment(
-                    segment_number=i + 1,
-                    title=f"补充{segment_title}",
-                    golden_hook=["眼前的一幕让人震惊！", "危险正在悄悄靠近！", "最后的真相竟然是这样！"][i],
-                    visual_prompt=f"{segment_title}画面，建立场景和氛围，9:16竖屏构图，无文字纯画面",
-                    video_prompt=f"0-3秒展示震撼的{segment_title}画面，3-7秒情节发展，7-10秒悬念铺垫，纯画面无文字",
-                    narration=["注意看！", "事情不简单", "继续往下看"],
-                    style_used='cinematic',
-                    aspect_ratio='9:16',
-                    keywords=[segment_title, '震撼']
-                )
-                segments.append(segment)
-        
+
+        for i, seg in enumerate(segments, 1):
+            seg.segment_number = i
+            if not seg.duration_sec:
+                seg.duration_sec = default_duration
+
+        if desired_durations and isinstance(desired_durations, list) and len(desired_durations) == desired_count:
+            for i, seg in enumerate(segments, 1):
+                try:
+                    d = int(desired_durations[i - 1])
+                except Exception:
+                    d = default_duration
+                seg.duration_sec = 5 if d >= 5 else 4
+
+
         return StoryData(
-            overall_title=raw_data.get('overall_title', '默认视频系列'),
-            plot_twist=raw_data.get('plot_twist', '最后的真相完全出乎意料！'),
-            segments=segments
+            overall_title=raw_data.get("overall_title", "约30秒分镜成片"),
+
+            plot_twist=raw_data.get("plot_twist", ""),
+            segments=segments,
         )
-    
-    def _create_fallback_story(self, story_input, style_config):
-        """创建备用故事"""
-        self.log("创建备用故事剧本...")
-        
+
+    def _create_fallback_story(self, story_input, style_key="cinematic", style_config=None, desired_count=10, durations=None):
+        """创建备用故事（保证 desired_count 个分镜）。
+
+        durations: 可选的每镜时长数组（仅允许4/5秒）
+        """
+
+        self.log("创建备用分镜脚本...")
+
+        if style_config is None:
+            style_config = COMIC_STYLES.get(style_key, COMIC_STYLES["cinematic"])
+
+        base_story = (getattr(story_input, "script_prompt", "") or getattr(story_input, "summary", "") or "").strip()
+        if not base_story:
+            base_story = getattr(story_input, "theme", "自定义故事")
+
         segments = []
-        segment_titles = [
-            f"{story_input.theme} - 开场",
-            f"{story_input.theme} - 发展", 
-            f"{story_input.theme} - 高潮"
-        ]
-        
-        golden_hooks = [
-            f"眼前的一幕让所有人惊呆了！{story_input.summary[:20]}...",
-            f"危险正在悄悄靠近，你还不知道！",
-            f"最后的真相竟然是这样..."
-        ]
-        
-        for i in range(3):
-            visual_prompt = f"{style_config['prompt']}，{story_input.summary}，"
-            video_prompt = f"0-3秒展示黄金钩子: {golden_hooks[i]}，3-7秒情节发展，7-10秒悬念铺垫，纯画面无文字"
-            
-            if i == 0:
-                visual_prompt += f"开场画面，建立场景和氛围，包含黄金钩子元素，9:16竖屏构图，无文字纯画面"
-            elif i == 1:
-                visual_prompt += f"情节发展画面，动作进行中，保持紧张感，9:16竖屏构图，无文字纯画面"
-            else:
-                visual_prompt += f"高潮转折画面，紧张时刻，为反转做准备，9:16竖屏构图，无文字纯画面"
-            
-            segments.append(StorySegment(
-                segment_number=i + 1,
-                title=segment_titles[i],
-                golden_hook=golden_hooks[i],
-                visual_prompt=visual_prompt,
-                video_prompt=video_prompt,
-                narration=["注意看！", "事情不简单", "继续往下看"],
-                style_used=style_config['name'],
-                aspect_ratio="9:16",
-                keywords=style_config['keywords'][:2]
-            ))
-        
+        for i in range(desired_count):
+            idx = i + 1
+            transition_strategy = "tailframe_continue" if idx > 1 and idx <= 3 else "hard_cut"
+
+            d = None
+            if durations and isinstance(durations, list) and len(durations) >= idx:
+                try:
+                    d = int(durations[idx - 1])
+                except Exception:
+                    d = None
+            duration_sec = 5 if (d and d >= 5) else 4
+
+            segments.append(
+                StorySegment(
+                    segment_number=idx,
+                    title=f"分镜{idx:02d}",
+                    golden_hook="",
+                    visual_prompt=f"{style_config['prompt']}，{base_story[:120]}，关键瞬间定格，9:16竖屏构图，绝对无文字纯画面",
+                    video_prompt=f"{duration_sec}秒短镜头：推进剧情一小步（动作+表情+环境变化），运镜简洁，绝对无文字纯画面",
+                    narration=[],
+                    style_used=style_key,
+                    aspect_ratio="9:16",
+                    keywords=style_config.get("keywords", [])[:2],
+                    duration_sec=duration_sec,
+                    transition_strategy=transition_strategy,
+                    transition_reason="备用脚本默认策略",
+                )
+            )
+
+
         return StoryData(
-            overall_title=f"{story_input.theme} - 三连视频",
-            plot_twist=f"{story_input.theme}的真相竟然完全出乎意料！",
-            segments=segments
+            overall_title=f"{getattr(story_input, 'theme', '自定义故事')} - 约30秒成片",
+
+            plot_twist="",
+            segments=segments,
         )
+
 
 class VisualDirectorAgent(BaseAgent):
     """视觉导演智能体 - 增强图像生成"""
     
-    def enhance_visual_prompt(self, base_prompt, style_name):
-        """增强视觉提示词"""
+    def enhance_visual_prompt(self, base_prompt, style_key):
+        """增强视觉提示词（内部使用 style key）"""
+        style_name = COMIC_STYLES.get(style_key, {}).get("name", style_key)
         self.log(f"增强{style_name}风格的视觉提示词...")
-        
+
         style_enhancements = {
-            "电影感": "电影级光影，浅景深效果，35mm胶片质感，戏剧性构图，无文字",
-            "写实摄影": "照片级真实感，自然光影，细节丰富，专业摄影，无文字",
-            "少年漫画": "动感十足，热血氛围，强烈对比，漫画质感，无文字",
-            "少女漫画": "柔和色彩，浪漫氛围，华丽细节，漫画风格，无文字",
-            "暗黑幻想": "黑暗氛围，哥特元素，神秘诡异，强烈对比，无文字"
+            "cinematic": "电影级光影，浅景深效果，35mm胶片质感，戏剧性构图，绝对无文字",
+            "realistic_photo": "照片级真实感，自然光影，细节丰富，专业摄影，绝对无文字",
+            "street_photography": "纪实抓拍质感，自然光影，真实细节，绝对无文字",
+            "studio_portrait": "专业影棚布光，人物突出，干净背景，绝对无文字",
+            "shonen": "动感十足，热血氛围，强烈对比，漫画质感，夸张动作，绝对无文字",
+            "shoujo": "柔和色彩，浪漫氛围，华丽细节，少女漫画质感，绝对无文字",
+            "seinen": "成熟写实画风，深沉色调，复杂构图，绝对无文字",
+            "dark": "黑暗氛围，哥特元素，神秘诡异，强烈对比，绝对无文字",
+            "scifi": "赛博朋克霓虹光，未来质感，雨夜反光，绝对无文字",
+            "cyberpunk_city": "未来都市霓虹与雨夜氛围，绝对无文字",
+            "oil_painting": "古典油画笔触质感，艺术光影，绝对无文字",
+            "watercolor": "水彩晕染与纸纹质感，柔和过渡，绝对无文字",
         }
-        
-        enhancement = style_enhancements.get(style_name, "高质量视觉，细节丰富，无文字")
+
+        enhancement = style_enhancements.get(style_key, "高质量视觉，细节丰富，绝对无文字")
         enhanced_prompt = f"{base_prompt}，{enhancement}"
-        
+
         self.log(f"提示词增强完成: {len(enhanced_prompt)}字符")
         return enhanced_prompt
+
     
     def recommend_camera_shots(self, scene_type):
         """推荐镜头语言"""
@@ -282,12 +386,16 @@ class RhythmDesignerAgent(BaseAgent):
         """设计节奏模式"""
         self.log(f"为'{story_segment.title}'设计节奏模式...")
         
-        # 基于场景类型推荐节奏
+        dur = int(getattr(story_segment, "duration_sec", VIDEO_CONFIG.get("video_duration", 4)) or VIDEO_CONFIG.get("video_duration", 4))
+
+        # 基于场景类型推荐节奏（单镜4/5秒）
         rhythm_patterns = {
-            "开场": "缓慢建立，0-3秒强力钩子，3-7秒平稳发展，7-10秒悬念铺垫",
-            "发展": "中等节奏，0-3秒新悬念，3-7秒冲突升级，7-10秒推向高潮", 
-            "高潮": "快速节奏，0-3秒紧张感，3-7秒爆发，7-10秒反转收尾"
+            "开场": f"{dur}秒短镜头：开头抓钩子画面，中段动作推进，结尾留下悬念",
+            "发展": f"{dur}秒短镜头：开头变化出现，中段冲突升级，结尾切到下一镜",
+            "高潮": f"{dur}秒短镜头：开头紧张爆发，中段关键动作，结尾反转定格"
         }
+
+
         
         # 根据标题判断场景类型
         scene_type = "发展"  # 默认
@@ -321,9 +429,11 @@ class QualityInspectorAgent(BaseAgent):
         score = 10  # 基础分
         
         # 检查分段数量
-        if len(story_data.segments) < 3:
+        expected = int(VIDEO_CONFIG.get("video_count", 5))
+        if len(story_data.segments) < expected:
             score -= 2
-            self.log("⚠️ 分段数量不足3个")
+            self.log(f"⚠️ 分段数量不足{expected}个")
+
         
         # 检查黄金钩子质量
         for i, segment in enumerate(story_data.segments):

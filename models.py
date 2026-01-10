@@ -15,9 +15,14 @@ class StorySegment:
     visual_prompt: str
     video_prompt: str
     narration: List[str]
-    style_used: str
+    style_used: str  # 统一使用 COMIC_STYLES 的 key，例如 cinematic/dark
     aspect_ratio: str
     keywords: List[str]
+    duration_sec: int = 4
+
+    transition_strategy: str = "hard_cut"  # hard_cut | tailframe_continue
+    transition_reason: Optional[str] = None
+
 
 @dataclass
 class StoryData:
@@ -32,8 +37,12 @@ class StoryInput:
     theme: str
     summary: str
     characters: Optional[str] = None
-    style: str = "cinematic"
+    style: str = "cinematic"  # 视觉风格 key
     output_name: Optional[str] = None
+    script_prompt: Optional[str] = None  # 运行时一次性输入的粗糙剧本提示词
+    rhythm_style: str = "manju"  # manju | movie（节奏风格）
+    auto_mode: bool = False  # True 时跳过所有确认环节
+
 
 @dataclass
 class VideoResult:
@@ -78,8 +87,10 @@ class GenerationResult:
     series_dir: str = ""
     merge_instructions: str = ""
     detailed_report: str = ""
+    final_video_path: str = ""
     all_results: List[SegmentResult] = None
     reason: Optional[str] = None
+
     
     def __post_init__(self):
         if self.all_results is None:

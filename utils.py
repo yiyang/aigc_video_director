@@ -328,7 +328,269 @@ def get_video_info(video_path):
     except Exception as e:
         return {"error": str(e)}
 
+def plan_segment_durations(
+    target_total_sec=None,
+    tolerance_sec=None,
+    allowed_durations=None,
+    min_duration_sec=None,
+    max_segments=None,
+    prefer_more_cuts=True,
+):
+    """规划分镜数量与每镜时长。
+
+    目标：总时长约为 target_total_sec，允许误差 tolerance_sec；每镜时长不得低于 min_duration_sec，且必须来自 allowed_durations。
+
+    返回：
+    - segment_count: int
+    - durations: List[int]
+    - planned_total: int
+    """
+    # 读取默认配置
+    target_total_sec = int(target_total_sec or VIDEO_CONFIG.get("target_total_duration", 30))
+    tolerance_sec = int(tolerance_sec if tolerance_sec is not None else VIDEO_CONFIG.get("target_total_tolerance", 2))
+    min_duration_sec = int(min_duration_sec or VIDEO_CONFIG.get("segment_duration_min", 4))
+    max_segments = int(max_segments or VIDEO_CONFIG.get("max_segments", VIDEO_CONFIG.get("video_count", 10)))
+
+    allowed_durations = allowed_durations or VIDEO_CONFIG.get("segment_duration_options", [4, 5])
+    allowed = sorted({int(x) for x in allowed_durations if int(x) >= min_duration_sec})
+    if not allowed:
+        raise ValueError("allowed_durations 不能为空，且必须满足最小时长约束")
+
+    # 当前项目约束：只允许 4/5 秒
+    if allowed != [4, 5]:
+        # 未来可扩展（DP），但先显式报错避免生成超预期时长
+        raise ValueError(f"当前仅支持 [4,5] 秒分配，实际为: {allowed}")
+
+    lo = target_total_sec - tolerance_sec
+    hi = target_total_sec + tolerance_sec
+
+    # 枚举镜头数 N，寻找最优组合：total = 4N + k (k=升级为5秒的镜头数)
+    candidates = []
+    for n in range(1, max_segments + 1):
+        min_total = 4 * n
+        max_total = 5 * n
+
+        # 最接近 target_total 的 total（先 clamp 到可达区间）
+        desired_total = max(min_total, min(target_total_sec, max_total))
+        k = desired_total - min_total
+        k = max(0, min(n, k))
+        total = min_total + k
+
+        # 评分：优先命中容忍区间；其次距离 target 更近；再根据节奏偏好选更多/更少镜头
+        in_band = (lo <= total <= hi)
+        dist = abs(total - target_total_sec)
+        candidates.append((
+            0 if in_band else 1,
+            dist,
+            -n if prefer_more_cuts else n,
+            n,
+            k,
+            total,
+        ))
+
+    candidates.sort()
+    _, _, _, n, k, total = candidates[0]
+
+    # 构造 durations：默认 4s，前 k 个升级为 5s（可调整分布策略）
+    durations = [5] * k + [4] * (n - k)
+
+    # 为了让节奏更均匀：把 5s 均匀散开（避免全堆在片头）
+    if k > 1:
+        five_positions = set()
+        step = (n - 1) / float(k)
+        for i in range(k):
+            pos = int(round(i * step))
+            five_positions.add(pos)
+        durations = [5 if i in five_positions and len(five_positions) > 0 else 4 for i in range(n)]
+        # 修正数量（避免 round 导致偏差）
+        current_k = sum(1 for d in durations if d == 5)
+        if current_k > k:
+            for i in range(n - 1, -1, -1):
+                if durations[i] == 5 and current_k > k:
+                    durations[i] = 4
+                    current_k -= 1
+        elif current_k < k:
+            for i in range(n):
+                if durations[i] == 4 and current_k < k:
+                    durations[i] = 5
+                    current_k += 1
+
+    planned_total = sum(durations)
+    return n, durations, planned_total
+
+
+def merge_videos_ffmpeg(segment_paths, output_path, target_duration_sec=None, force_no_audio=False):
+    """使用 ffmpeg 合并多个视频为单个成片。
+
+    - 优先尝试 concat demuxer + stream copy（快但要求规格一致）
+    - 失败则 fallback 到 concat filter + 重新编码（更稳）
+    - 默认保留音轨；如 force_no_audio=True 则显式去音频（-an）
+    """
+
+    if not segment_paths:
+        raise ValueError("segment_paths 不能为空")
+
+    existing = [p for p in segment_paths if p and os.path.exists(p)]
+    if len(existing) != len(segment_paths):
+        missing = [p for p in segment_paths if not p or not os.path.exists(p)]
+        raise FileNotFoundError(f"部分分段文件不存在: {missing}")
+
+    out_dir = os.path.dirname(output_path)
+    os.makedirs(out_dir, exist_ok=True)
+
+    concat_list_path = os.path.join(out_dir, "concat_list.txt")
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for p in existing:
+            ap = os.path.abspath(p).replace("\\\\", "/")
+            ap = ap.replace("'", "\\'")
+            f.write(f"file '{ap}'\n")
+
+    audio_flags = ["-an"] if force_no_audio else []
+
+    def _run(cmd):
+        print("  ▶ ffmpeg:", " ".join(cmd))
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.returncode == 0, (result.stderr or "")
+
+    def _has_audio(video_path):
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=index",
+                    "-of", "json",
+                    video_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if probe.returncode != 0 or not probe.stdout:
+                return False
+            data = json.loads(probe.stdout)
+            return len(data.get("streams", []) or []) > 0
+        except Exception:
+            return False
+
+    # 1) 快速路径：concat demuxer + copy
+    tmp_merged = os.path.join(out_dir, "merged_tmp.mp4")
+    cmd_copy = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0",
+        "-i", concat_list_path,
+        *audio_flags,
+        "-c", "copy",
+        tmp_merged,
+    ]
+    ok, err = _run(cmd_copy)
+
+    if not ok:
+        # 2) 稳定路径：concat filter + re-encode
+        inputs = []
+        for p in existing:
+            inputs += ["-i", p]
+
+        n = len(existing)
+        keep_audio = not force_no_audio
+        has_audio_all = keep_audio and all(_has_audio(p) for p in existing)
+
+        if keep_audio and not has_audio_all:
+            print("  ⚠️ 分段音轨不一致或缺失，fallback合成可能不包含音频")
+
+        if has_audio_all:
+            filter_in = "".join([f"[{i}:v:0][{i}:a:0]" for i in range(n)])
+            filter_complex = f"{filter_in}concat=n={n}:v=1:a=1[v][a]"
+            cmd_filter = [
+                "ffmpeg", "-y",
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[v]",
+                "-map", "[a]",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                tmp_merged,
+            ]
+        else:
+            filter_in = "".join([f"[{i}:v]" for i in range(n)])
+            filter_complex = f"{filter_in}concat=n={n}:v=1:a=0[v]"
+            cmd_filter = [
+                "ffmpeg", "-y",
+                *inputs,
+                "-filter_complex", filter_complex,
+                "-map", "[v]",
+                *audio_flags,
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                tmp_merged,
+            ]
+
+        ok, err = _run(cmd_filter)
+
+    if not ok:
+        raise RuntimeError(f"ffmpeg 合并失败: {err[:500]}")
+
+    # 3) 可选裁切到目标时长（默认保留音轨）
+    cmd_trim = ["ffmpeg", "-y", "-i", tmp_merged]
+    if target_duration_sec:
+        cmd_trim += ["-t", str(int(target_duration_sec))]
+
+    if force_no_audio:
+        cmd_trim += [
+            "-map", "0:v:0",
+            "-an",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            output_path,
+        ]
+    else:
+        cmd_trim += [
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            output_path,
+        ]
+
+    ok, err = _run(cmd_trim)
+    if not ok:
+        raise RuntimeError(f"ffmpeg 输出失败: {err[:500]}")
+
+    # 4) 简单校验：音频流数量 + 时长
+    try:
+        cmd_audio = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "json",
+            output_path,
+        ]
+        probe = subprocess.run(cmd_audio, capture_output=True, text=True, timeout=15)
+        audio_count = 0
+        if probe.returncode == 0 and probe.stdout:
+            data = json.loads(probe.stdout)
+            audio_count = len(data.get("streams", []) or [])
+        if force_no_audio and audio_count > 0:
+            raise RuntimeError(f"输出仍检测到音频流 {audio_count} 条（已要求强制无音频）")
+        print(f"  🎧 音轨流数量: {audio_count}")
+
+        info = get_video_info(output_path)
+        if target_duration_sec and isinstance(info, dict) and "duration" in info:
+            print(f"  ✅ 合成后时长: {info['duration']:.2f}s（目标 {int(target_duration_sec)}s）")
+    except Exception:
+        pass
+
+    return output_path
+
+
+
+
 def download_video(video_url, output_name):
+
     """下载生成的视频 - 完整实现"""
     print(f"  ⬇⬇⬇️  下载视频...")
     
@@ -640,7 +902,8 @@ def display_storyboard(story_data):
         
         # 显示黄金钩子
         if golden_hook:
-            print(f"🎯🎯 3秒黄金钩子: {golden_hook}")
+            print(f"🎯🎯 开场钩子: {golden_hook}")
+
         
         # 显示解说词
         if narration:
@@ -779,7 +1042,8 @@ def display_golden_hook_confirmation(story_data):
         print("❌ 无法识别的故事数据类型")
         return confirm_with_user("\n❌ 数据类型错误，是否继续生成？")
     
-    print(f"\n📊📊 黄金钩子检查 (前3秒吸引观众):")
+    print(f"\n📊📊 黄金钩子检查 (开场吸引观众):")
+
     print("-"*50)
     
     all_hooks_valid = True
