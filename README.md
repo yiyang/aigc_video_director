@@ -131,4 +131,4 @@ python test_duration_planner.py
 
 ## 许可证
 
-本项目采用 Apache2 许可证。
+本项目采用 [MIT 许可证](LICENSE)。
